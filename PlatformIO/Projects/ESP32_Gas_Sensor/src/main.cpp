@@ -30,10 +30,14 @@ float readGas(){
   int sensorValue = analogRead(GAS_SENSOR_AO);
   float voltage = sensorValue*(3.3/4095.0); //convert ADC to volatage 
 
+  float percentage = (voltage/3.3)*100; //convert voltage to percentage
+
   Serial.print("Analog Vlaue:");
   Serial.print(sensorValue);
   Serial.print(" | Voltage: ");
   Serial.print(voltage);
+  Serial.print(" | Percentage: ");
+  Serial.print(percentage);
 
   return voltage;
 }
