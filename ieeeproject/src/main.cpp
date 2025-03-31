@@ -1,25 +1,19 @@
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <Arduino.h>
+#include "weather.h"
+#include "display.h"
+#include "LocalSensor.h"
+#include "WindowController.h"
 
-// Function prototypes - add these before setup()
-void connectToWiFi();
-void getWeatherData();
+// DHT sensor setup
+#define DHTPIN 9
+#define DHTTYPE DHT11
 
-// WiFi credentials
-const char *ssid = "Noah";
-const char *password = "11111111";
+// Servo setup
+#define SERVOPIN 3
 
-// Open-Meteo API configuration
-
-const String latitude = "40.699155";   // Latitude for AEC
-const String longitude = "-75.210961"; // Longitude for AEC
-const String weatherUrl = "https://api.open-meteo.com/v1/forecast?latitude=" + latitude +
-                          "&longitude=" + longitude +
-                          "&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m";
-
-unsigned long lastFetchTime = 0;
-const unsigned long fetchInterval = 5 * 60 * 1000; // 5 minutes in milliseconds
+// Create instances
+LocalSensor localSensor(DHTPIN, DHTTYPE);
+WindowController windowController(SERVOPIN);
 
 void setup()
 {
@@ -35,30 +29,74 @@ void setup()
 
   delay(1000); // Give serial monitor time to start
 
-  Serial.println("\n\n=== ESP32 Weather Station ===");
+  Serial.println("\n\n=== ESP32 Smart Window Controller ===");
   Serial.println("Initializing...");
 
-  // Connect to WiFi
-  connectToWiFi();
-  getWeatherData();
+  // Initialize display
+  if (!displayInit())
+  {
+    Serial.println("Failed to initialize display!");
+  }
+  else
+  {
+    displayMessage("Smart Window", "Initializing...");
+  }
+
+  // Initialize DHT sensor
+  localSensor.begin();
+
+  // Initialize window controller
+  windowController.begin();
+
+  // Initialize weather module
+  weatherInit();
+
+  // Get initial local sensor readings
+  localSensor.update(true);
+
+  // Display startup message
+  displayMessage("Smart Window", "Ready!", "Monitoring temp...");
 }
 
 void loop()
 {
-  // Check WiFi connection
-  if (WiFi.status() != WL_CONNECTED)
+  // Update local sensor readings
+  localSensor.update();
+
+  // Get current weather data
+  WeatherData weather = getWeather();
+
+  // Update display with weather and window information
+  String windowStatus = "Window: ";
+  int position = windowController.getCurrentPosition();
+  if (position == 0)
   {
-    Serial.println("WiFi disconnected. Reconnecting...");
-    connectToWiFi();
+    windowStatus += "Closed";
+  }
+  else if (position < 45)
+  {
+    windowStatus += "Barely Open";
+  }
+  else if (position < 90)
+  {
+    windowStatus += "Partly Open";
+  }
+  else if (position < 135)
+  {
+    windowStatus += "Mostly Open";
+  }
+  else
+  {
+    windowStatus += "Fully Open";
   }
 
-  // Fetch weather data every 5 minutes
-  unsigned long currentTime = millis();
-  if (currentTime - lastFetchTime >= fetchInterval || lastFetchTime == 0)
-  {
-    getWeatherData();
-    lastFetchTime = currentTime;
-  }
+  displayMessage(
+      "In: " + String(localSensor.getTemperature()) + "F Out: " + String(weather.temperatureF) + "F",
+      windowStatus,
+      weather.weatherType);
+
+  // Adjust window based on temperature
+  windowController.adjustBasedOnTemperature(localSensor.getTemperature(), weather);
 
   // Process any serial commands
   if (Serial.available())
@@ -69,110 +107,53 @@ void loop()
     if (command == "weather")
     {
       Serial.println("Manual weather update requested");
-      getWeatherData();
+      refreshWeather();
+      weather = getWeather();
+
+      // Display weather info
+      Serial.println("\n=== Weather Conditions ===");
+      Serial.print("Data Source: ");
+      Serial.println(weather.isRealData ? "Real (API)" : "Simulated");
+      Serial.print("Temperature: ");
+      Serial.print(weather.temperatureF);
+      Serial.println(" °F");
+      Serial.print("Wind Speed: ");
+      Serial.print(weather.windSpeedMPH);
+      Serial.println(" MPH");
+      Serial.print("Weather: ");
+      Serial.println(weather.weatherType);
+      Serial.print("Precipitation: ");
+      Serial.print(weather.precipitationAmount);
+      Serial.println(weather.isRealData ? " mm" : " in");
+      Serial.print("Precipitation Chance: ");
+      Serial.print(weather.precipitationChance);
+      Serial.println("%");
+      Serial.println("==========================\n");
+    }
+    else if (command == "local")
+    {
+      // Force update of local sensor readings
+      localSensor.update(true);
+
+      // Display local sensor readings
+      Serial.println("\n=== Local Sensor Readings ===");
+      Serial.print("Temperature: ");
+      Serial.print(localSensor.getTemperature());
+      Serial.println(" °F");
+      Serial.print("Humidity: ");
+      Serial.print(localSensor.getHumidity());
+      Serial.println(" %");
+      Serial.println("============================\n");
+    }
+    else if (command.startsWith("window "))
+    {
+      // Manual window control
+      int pos = command.substring(7).toInt();
+      Serial.print("Manual window position: ");
+      Serial.println(pos);
+      windowController.setPosition(pos);
     }
   }
 
   delay(1000); // Small delay to prevent CPU hogging
-}
-
-void connectToWiFi()
-{
-  Serial.print("Connecting to WiFi network: ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  // Wait for connection with timeout
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout < 20)
-  {
-    delay(500);
-    Serial.print(".");
-    timeout++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("\nWiFi connected successfully!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-  }
-  else
-  {
-    Serial.println("\nFailed to connect to WiFi. Please check credentials.");
-  }
-}
-
-void getWeatherData()
-{
-  Serial.println("\n--- Fetching weather data ---");
-
-  HTTPClient http;
-  http.begin(weatherUrl);
-
-  Serial.print("Sending GET request to: ");
-  Serial.println(weatherUrl);
-
-  int httpCode = http.GET();
-  Serial.print("HTTP response code: ");
-  Serial.println(httpCode);
-
-  if (httpCode == 200)
-  {
-    String payload = http.getString();
-
-    // Print raw JSON for debugging
-    Serial.println("Raw JSON response:");
-    Serial.println(payload);
-
-    // Parse JSON
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, payload);
-
-    if (error)
-    {
-      Serial.print("JSON parsing failed: ");
-      Serial.println(error.c_str());
-    }
-    else
-    {
-      // Extract weather data
-      float temperature = doc["current"]["temperature_2m"];
-      float humidity = doc["current"]["relative_humidity_2m"];
-      float precipitation = doc["current"]["precipitation"];
-      float windSpeed = doc["current"]["wind_speed_10m"];
-      String tempUnit = doc["current_units"]["temperature_2m"];
-      String humidityUnit = doc["current_units"]["relative_humidity_2m"];
-      String precipUnit = doc["current_units"]["precipitation"];
-      String windUnit = doc["current_units"]["wind_speed_10m"];
-
-      // Print formatted weather data
-      Serial.println("\n=== Current Weather Conditions ===");
-      Serial.print("Temperature: ");
-      Serial.print(temperature);
-      Serial.println(" " + tempUnit);
-
-      Serial.print("Humidity: ");
-      Serial.print(humidity);
-      Serial.println(" " + humidityUnit);
-
-      Serial.print("Precipitation: ");
-      Serial.print(precipitation);
-      Serial.println(" " + precipUnit);
-
-      Serial.print("Wind Speed: ");
-      Serial.print(windSpeed);
-      Serial.println(" " + windUnit);
-
-      Serial.println("==================================\n");
-    }
-  }
-  else
-  {
-    Serial.print("HTTP request failed with error code: ");
-    Serial.println(httpCode);
-  }
-
-  http.end();
 }
